@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Shield, Phone, MapPin, Users, Camera, Mic, Video, Watch, Settings, Home, Lock, Unlock, Battery, Wifi, WifiOff, X } from 'lucide-react';
 
+// ===========================================
+// 🟢 CONFIGURATION (Manage Everything Here)
+// ===========================================
+// CHANGE THIS URL when you deploy to Render!
+// Example: "https://pratham-backend.onrender.com"
+const API_BASE_URL = "http://localhost:5000"; 
+
 // BLE UUIDs for your Watch
 const BLE_SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb'; 
 const BLE_CHAR_UUID =    '0000ffe1-0000-1000-8000-00805f9b34fb';
@@ -23,7 +30,7 @@ export default function PrathamSuraksha() {
   const [batteryLevel, setBatteryLevel] = useState(100);
   const [lowPowerMode, setLowPowerMode] = useState(false);
   const [wearableConnected, setWearableConnected] = useState(false);
-  const [parentalMode, setParentalMode] = useState(false); // 🟢 Parental Control State
+  const [parentalMode, setParentalMode] = useState(false);
   
   // Install State
   const [deferredPrompt, setDeferredPrompt] = useState(null);
@@ -80,7 +87,6 @@ export default function PrathamSuraksha() {
       characteristic.addEventListener('characteristicvaluechanged', (event) => {
         const value = new TextDecoder().decode(event.target.value);
         if (value.includes("SOS")) {
-            // Watch Button Pressed! -> Trigger Family SOS (Type 3)
             handleEmergencyTap(3, true); 
         }
       });
@@ -94,7 +100,8 @@ export default function PrathamSuraksha() {
   // 3. 🔋 SMART BATTERY & GPS LOGIC
   // ============================================
   useEffect(() => {
-    fetch("http://localhost:5000/api/contacts/list") 
+    // 🟢 SECURE: Using the Centralized URL Variable
+    fetch(`${API_BASE_URL}/api/contacts/list`) 
       .then(res => res.json())
       .then(data => { if (Array.isArray(data)) setEmergencyContacts(data); })
       .catch(err => console.log("Offline: Using empty contact list"));
@@ -102,7 +109,6 @@ export default function PrathamSuraksha() {
 
   useEffect(() => {
     if ('geolocation' in navigator) {
-      // 🔋 BATTERY SAVER: High Accuracy ONLY when SOS/Parental Mode is active
       const useHighAccuracy = offlineMode || !lowPowerMode || parentalMode;
       const options = { enableHighAccuracy: useHighAccuracy, timeout: 30000, maximumAge: 60000 };
 
@@ -149,16 +155,15 @@ export default function PrathamSuraksha() {
     let title = "";
     let contacts = [];
     
-    // --- 1 TAP: POLICE SMS ---
+    // 1 TAP: POLICE SMS
     if (tapType === 1) { 
         title = "Police Help"; 
-        contacts = ["100"]; // SMS to 100 might fail on some networks, serves as placeholder
-        // Open native SMS app for Police
+        contacts = ["100"]; 
         const mapLink = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
         window.location.href = `sms:100?body=${encodeURIComponent(`SOS! I need Police Help at ${locationName}. Map: ${mapLink}`)}`;
         return;
     } 
-    // --- 2 TAPS: AMBULANCE SMS ---
+    // 2 TAPS: AMBULANCE SMS
     else if (tapType === 2) { 
         title = "Medical Emergency"; 
         contacts = ["108"];
@@ -166,7 +171,7 @@ export default function PrathamSuraksha() {
         window.location.href = `sms:108?body=${encodeURIComponent(`SOS! I need Ambulance at ${locationName}. Map: ${mapLink}`)}`;
         return;
     } 
-    // --- 3 TAPS (or Watch): FAMILY SOS + RECORDING ---
+    // 3 TAPS: FAMILY SOS + RECORDING
     else if (tapType >= 3) {
       title = "Family Emergency";
       if (emergencyContacts.length === 0) {
@@ -179,10 +184,8 @@ export default function PrathamSuraksha() {
 
     if (!fromWatch && !window.confirm(`⚠️ ${title}\n\nSend SOS to Parents & Start Recording?`)) return;
 
-    // 🎥 AUTO-RECORD VIDEO (Background Evidence)
     if (!isRecording) startAnonymousRecording('video', true);
 
-    // 📡 FORCE HIGH ACCURACY GPS NOW
     navigator.geolocation.getCurrentPosition(async (pos) => {
       const preciseLat = pos.coords.latitude;
       const preciseLng = pos.coords.longitude;
@@ -197,10 +200,10 @@ export default function PrathamSuraksha() {
         time: new Date().toISOString() 
       };
 
-      // 1. Send to Backend (MongoDB)
+      // 🟢 SECURE: Using the Centralized URL Variable
       if (navigator.onLine && !offlineMode) {
         try {
-          await fetch("http://localhost:5000/api/sos", {
+          await fetch(`${API_BASE_URL}/api/sos`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(sosData),
@@ -209,7 +212,6 @@ export default function PrathamSuraksha() {
         } catch (err) { sendOfflineSMS(contacts, title, mapLink, preciseLat, preciseLng); }
       } 
       
-      // 2. ALWAYS Send Offline SMS (Native App) as fallback/primary
       sendOfflineSMS(contacts, title, mapLink, preciseLat, preciseLng);
       
     }, (err) => {
@@ -225,7 +227,7 @@ export default function PrathamSuraksha() {
   };
 
   // ============================================
-  // 5. 📹 RECORDING (LOCAL + MONGODB)
+  // 5. 📹 RECORDING
   // ============================================
   const startAnonymousRecording = async (type, isAuto = false) => {
     if (!navigator.mediaDevices) { if(!isAuto) alert("Hardware not supported."); return; }
@@ -235,33 +237,30 @@ export default function PrathamSuraksha() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: type !== 'audio' });
       const mediaRecorder = new MediaRecorder(stream);
       const chunks = [];
-      
       mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
       
       mediaRecorder.onstop = async () => {
         const blob = new Blob(chunks, { type: type === 'video' ? 'video/webm' : 'audio/webm' });
-        
-        // 1. Save Locally (Offline Support)
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
         a.download = `SOS_${type}_${Date.now()}.webm`;
         a.click();
 
-        // 2. Upload to MongoDB (Online Support)
         if (navigator.onLine) {
           const reader = new FileReader();
           reader.readAsDataURL(blob);
           reader.onloadend = async () => {
             try {
-              await fetch("http://localhost:5000/api/sos", {
+              // 🟢 SECURE: Using the Centralized URL Variable
+              await fetch(`${API_BASE_URL}/api/sos`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                   type: `Evidence (${type})`,
                   contacts: emergencyContacts.map(c => c.phone),
                   location: location,
-                  mediaData: reader.result, // Base64 Video
+                  mediaData: reader.result, 
                   mediaType: type === 'video' ? 'video/webm' : 'audio/webm'
                 })
               });
@@ -275,7 +274,6 @@ export default function PrathamSuraksha() {
       };
 
       mediaRecorder.start();
-      // Auto-stop after 30s to keep file size manageable for auto-upload
       setTimeout(() => { if (mediaRecorder.state === 'recording') mediaRecorder.stop(); }, 30000); 
 
     } catch (err) { setIsRecording(false); }
@@ -305,7 +303,8 @@ export default function PrathamSuraksha() {
   const saveContactsToDB = (newContacts) => {
     setEmergencyContacts(prev => [...prev, ...newContacts]);
     newContacts.forEach(c => {
-        fetch("http://localhost:5000/api/contacts/add", {
+        // 🟢 SECURE: Using the Centralized URL Variable
+        fetch(`${API_BASE_URL}/api/contacts/add`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(c)
@@ -357,7 +356,7 @@ export default function PrathamSuraksha() {
 }
 
 // ============================================
-// UI COMPONENTS
+// UI COMPONENTS (Preserved)
 // ============================================
 const HeaderComponent = ({ offlineMode, isLocked, batteryLevel, lowPowerMode }) => (
     <div className="bg-gradient-to-r from-pink-600 to-purple-600 text-white p-4 shadow-lg">
