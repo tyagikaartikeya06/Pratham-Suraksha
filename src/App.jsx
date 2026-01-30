@@ -6,7 +6,7 @@ import { Shield, Phone, MapPin, Users, Camera, Mic, Video, Watch, Settings, Home
 // ===========================================
 // CHANGE THIS URL when you deploy to Render!
 // Example: "https://pratham-backend.onrender.com"
-const API_BASE_URL = "http://localhost:5000"; 
+const API_BASE_URL = "https://pratham-backend-9q7v.onrender.com"; 
 
 // BLE UUIDs for your Watch
 const BLE_SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb'; 
