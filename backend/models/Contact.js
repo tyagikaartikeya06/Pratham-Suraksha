@@ -1,9 +1,22 @@
 const mongoose = require("mongoose");
 
-const contactSchema = new mongoose.Schema({
-  name: String,
-  phone: String,
-  relation: String
+const ContactSchema = new mongoose.Schema({
+  userId: { 
+    type: String, 
+    required: true // 🟢 NEW: Every contact MUST belong to a specific user
+  },
+  name: {
+    type: String,
+    required: true,
+  },
+  phone: {
+    type: String,
+    required: true,
+  },
+  relation: {
+    type: String,
+    default: "Emergency",
+  },
 });
 
-module.exports = mongoose.model("Contact", contactSchema);
+module.exports = mongoose.model("Contact", ContactSchema);

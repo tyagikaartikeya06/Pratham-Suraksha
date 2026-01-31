@@ -17,8 +17,11 @@ export default function PrathamSuraksha() {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingType, setRecordingType] = useState(null);
   
-  // 🟢 NEW: State to toggle local saving
+  // State to toggle local saving
   const [saveLocally, setSaveLocally] = useState(true); 
+
+  // 🟢 NEW: User ID State for Privacy
+  const [userId, setUserId] = useState(null);
 
   // Data States
   const [emergencyContacts, setEmergencyContacts] = useState([]); 
@@ -39,6 +42,19 @@ export default function PrathamSuraksha() {
   const tapTimerRef = useRef(null);
   const locationWatchId = useRef(null);
   const bluetoothDeviceRef = useRef(null);
+
+  // ============================================
+  // 🟢 0. USER ID GENERATION (PRIVACY LOGIC)
+  // ============================================
+  useEffect(() => {
+    let storedId = localStorage.getItem('pratham_user_id');
+    if (!storedId) {
+        // Generate a random unique ID for this device
+        storedId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        localStorage.setItem('pratham_user_id', storedId);
+    }
+    setUserId(storedId);
+  }, []);
 
   // ============================================
   // 1. 📲 INSTALLATION LOGIC
@@ -86,24 +102,27 @@ export default function PrathamSuraksha() {
   };
 
   // ============================================
-  // 3. 🔋 SMART BATTERY & GPS LOGIC (➕ ADDED FALLBACK)
+  // 3. 🔋 SMART BATTERY & GPS LOGIC (With User Isolation)
   // ============================================
   useEffect(() => {
-    fetch(`${API_BASE_URL}/api/contacts/list`) 
-      .then(res => res.json())
-      .then(data => { if (Array.isArray(data)) setEmergencyContacts(data); })
-      .catch(err => console.log("Offline: Using empty contact list"));
-  }, []);
+    // 🟢 UPDATED: Only fetch contacts belonging to this userId
+    if (userId) {
+        fetch(`${API_BASE_URL}/api/contacts/list?userId=${userId}`) 
+        .then(res => res.json())
+        .then(data => { if (Array.isArray(data)) setEmergencyContacts(data); })
+        .catch(err => console.log("Offline: Using empty contact list"));
+    }
+  }, [userId]); // Runs only when userId is ready
 
   useEffect(() => {
-    // Helper to get IP Location (Fallback if GPS is off/closed)
+    // Helper to get IP Location (Fallback)
     const fetchIPLocation = () => {
         if (!navigator.onLine) return;
         fetch('https://ipapi.co/json/')
             .then(res => res.json())
             .then(data => {
                 if (data.latitude && data.longitude) {
-                    setLocation({ lat: data.latitude, lng: data.longitude, accuracy: 5000 }); // Low accuracy
+                    setLocation({ lat: data.latitude, lng: data.longitude, accuracy: 5000 });
                     setLocationName(`${data.city}, ${data.region} (Approx)`);
                     console.log("Using IP Location Fallback");
                 }
@@ -137,13 +156,11 @@ export default function PrathamSuraksha() {
         },
         (error) => {
             console.log('GPS Error:', error);
-            // 🟢 NEW: If GPS fails or is closed, try IP Location
             fetchIPLocation();
         },
         options
       );
     } else {
-        // Fallback for browsers without geo
         fetchIPLocation();
     }
     return () => { if (locationWatchId.current) navigator.geolocation.clearWatch(locationWatchId.current); };
@@ -162,19 +179,16 @@ export default function PrathamSuraksha() {
   };
 
   const handleEmergencyTap = async (tapType, fromWatch = false) => {
-    let title = "";
-    let contacts = [];
+    let title = "", contacts = [];
     
     if (tapType === 1) { 
-        title = "Police Help"; 
-        contacts = ["100"]; 
+        title = "Police Help"; contacts = ["100"]; 
         const mapLink = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
         window.location.href = `sms:100?body=${encodeURIComponent(`SOS! I need Police Help at ${locationName}. Map: ${mapLink}`)}`;
         return;
     } 
     else if (tapType === 2) { 
-        title = "Medical Emergency"; 
-        contacts = ["108"];
+        title = "Medical Emergency"; contacts = ["108"];
         const mapLink = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
         window.location.href = `sms:108?body=${encodeURIComponent(`SOS! I need Ambulance at ${locationName}. Map: ${mapLink}`)}`;
         return;
@@ -193,29 +207,31 @@ export default function PrathamSuraksha() {
 
     if (!isRecording) startAnonymousRecording('video', true);
 
-    // Use current state location immediately in case GPS callback takes time
-    const sendAlert = (lat, lng) => {
-        const mapLink = `https://www.google.com/maps?q=${lat},${lng}`;
-        const msgBody = `SOS! ${title} at ${locationName}. Loc: ${lat}, ${lng}. Map: ${mapLink}`;
-        const sosData = { type: title, contacts, location: { lat, lng }, message: msgBody, time: new Date().toISOString() };
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      const preciseLat = pos.coords.latitude;
+      const preciseLng = pos.coords.longitude;
+      const mapLink = `https://www.google.com/maps?q=${preciseLat},${preciseLng}`;
+      const msgBody = `SOS! ${title} at ${locationName}. Loc: ${preciseLat}, ${preciseLng}. Map: ${mapLink}`;
 
-        if (navigator.onLine && !offlineMode) {
-            fetch(`${API_BASE_URL}/api/sos`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(sosData),
-            }).then(() => { if(!fromWatch) alert(`✅ Alert Sent to Server!`); })
-              .catch(() => sendOfflineSMS(contacts, title, mapLink, lat, lng));
-        }
-        sendOfflineSMS(contacts, title, mapLink, lat, lng);
-    };
+      const sosData = { type: title, contacts, location: { lat: preciseLat, lng: preciseLng }, message: msgBody, time: new Date().toISOString() };
 
-    // Try to get fresh location, otherwise use state
-    navigator.geolocation.getCurrentPosition(
-        (pos) => sendAlert(pos.coords.latitude, pos.coords.longitude),
-        (err) => sendAlert(location.lat, location.lng), // Fallback to existing state (IP or last known)
-        { enableHighAccuracy: true, timeout: 5000 }
-    );
+      if (navigator.onLine && !offlineMode) {
+        try {
+          await fetch(`${API_BASE_URL}/api/sos`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(sosData),
+          });
+          if(!fromWatch) alert(`✅ Alert Sent to Server!`);
+        } catch (err) { sendOfflineSMS(contacts, title, mapLink, preciseLat, preciseLng); }
+      } 
+      
+      sendOfflineSMS(contacts, title, mapLink, preciseLat, preciseLng);
+      
+    }, (err) => {
+        const mapLink = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
+        sendOfflineSMS(contacts, title, mapLink, location.lat, location.lng);
+    }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
   };
 
   const sendOfflineSMS = (contacts, title, mapLink, lat, lng) => {
@@ -225,7 +241,7 @@ export default function PrathamSuraksha() {
   };
 
   // ============================================
-  // 5. 📹 RECORDING (➕ ADDED LOCAL SAVE TOGGLE CHECK)
+  // 5. 📹 RECORDING
   // ============================================
   const startAnonymousRecording = async (type, isAuto = false) => {
     if (!navigator.mediaDevices) { if(!isAuto) alert("Hardware not supported."); return; }
@@ -240,7 +256,6 @@ export default function PrathamSuraksha() {
       mediaRecorder.onstop = async () => {
         const blob = new Blob(chunks, { type: type === 'video' ? 'video/webm' : 'audio/webm' });
         
-        // 🟢 NEW: Check 'saveLocally' state before downloading
         if (saveLocally) {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
@@ -287,7 +302,7 @@ export default function PrathamSuraksha() {
   };
 
   // ============================================
-  // 6. 📞 CONTACTS
+  // 6. 📞 CONTACTS (➕ PRIVACY & VALIDATION)
   // ============================================
   const handleAddContact = async () => {
     if ('contacts' in navigator && 'ContactsManager' in window) {
@@ -299,17 +314,33 @@ export default function PrathamSuraksha() {
     } else { manualAddContact(); }
   };
 
+  // 🟢 UPDATED: Validation for Name and Phone
   const manualAddContact = () => {
     const name = prompt("Name:");
-    if (name) {
-       const phone = prompt("Phone:");
-       if (phone) saveContactsToDB([{ name, phone, relation: 'Emergency' }]);
+    if (!name) return;
+    // Validate: Only Alphabets and Spaces
+    if (!/^[a-zA-Z\s]+$/.test(name)) {
+        alert("❌ Error: Name should contain Alphabets only.");
+        return;
     }
+
+    const phone = prompt("Phone:");
+    if (!phone) return;
+    // Validate: Only Digits
+    if (!/^\d+$/.test(phone)) {
+        alert("❌ Error: Phone should contain Numeric Digits only.");
+        return;
+    }
+
+    saveContactsToDB([{ name, phone, relation: 'Emergency' }]);
   };
 
   const saveContactsToDB = (newContacts) => {
-    setEmergencyContacts(prev => [...prev, ...newContacts]);
-    newContacts.forEach(c => {
+    // 🟢 UPDATED: Attach userId to contact so it's private
+    const contactsWithId = newContacts.map(c => ({ ...c, userId: userId }));
+    
+    setEmergencyContacts(prev => [...prev, ...contactsWithId]);
+    contactsWithId.forEach(c => {
         fetch(`${API_BASE_URL}/api/contacts/add`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -325,12 +356,12 @@ export default function PrathamSuraksha() {
   };
 
   // ============================================
-  // RENDER UI
+  // RENDER UI (EXACTLY AS YOU PROVIDED)
   // ============================================
   return (
     <div className="min-h-screen bg-gray-50 text-gray-800 font-sans">
       
-      {/* 🔵 HEADER */}
+      {/* 🔵 HEADER: Blue Gradient + Logo */}
       <div className="bg-gradient-to-r from-blue-900 to-blue-800 px-6 py-4 flex items-center gap-3 shadow-lg">
         <div className="w-12 h-12 rounded-full overflow-hidden bg-white flex items-center justify-center p-0.5">
            <img 
@@ -355,7 +386,7 @@ export default function PrathamSuraksha() {
         {activeTab === 'home' && (
           <div className="space-y-6">
             
-            {/* 🔴 SOS SECTION */}
+            {/* 🔴 SOS SECTION: Red Gradient */}
             <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden">
                 <div className="bg-gray-50 px-4 py-3 border-b border-gray-200">
                     <h2 className="text-gray-800 font-bold text-sm text-center">EMERGENCY TAP ZONE</h2>
@@ -372,7 +403,7 @@ export default function PrathamSuraksha() {
                 </div>
             </div>
 
-            {/* 🔵 RECORDING SECTION */}
+            {/* 🔵 RECORDING SECTION: Blue Gradient Buttons */}
             <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-5">
                 <div className="flex items-center justify-center gap-2 text-gray-700 mb-4">
                      <Camera className="w-5 h-5 text-gray-500" />
@@ -394,7 +425,7 @@ export default function PrathamSuraksha() {
                 </div>
             </div>
 
-            {/* LOCATION CARD */}
+            {/* LOCATION CARD (Minimal) */}
             <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-4">
                 <h3 className="font-bold text-lg mb-3 flex items-center gap-2 text-gray-800"><MapPin className="w-5 h-5 text-green-600" /> Live Location</h3>
                 <div className="bg-gray-50 p-4 rounded-xl mb-3 border border-gray-100">
@@ -404,7 +435,7 @@ export default function PrathamSuraksha() {
                 <button onClick={shareLocation} className="w-full py-3 bg-gradient-to-r from-blue-900 to-blue-800 text-white rounded-xl font-bold text-sm shadow hover:opacity-90">SHARE LOCATION</button>
             </div>
 
-            {/* WATCH CARD */}
+            {/* WATCH CARD (Minimal) */}
             <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-4">
                 <h3 className="font-bold text-lg mb-3 flex items-center gap-2 text-gray-800"><Watch className="w-5 h-5 text-purple-600" /> Wearable</h3>
                 <div className="flex items-center justify-between bg-gray-50 p-3 rounded-xl border border-gray-100 mb-3">
@@ -416,7 +447,7 @@ export default function PrathamSuraksha() {
           </div>
         )}
 
-        {/* CONTACTS TAB */}
+        {/* 🎨 CONTACTS TAB (Styled) */}
         {activeTab === 'contacts' && (
             <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-4">
                 <h2 className="text-gray-800 font-bold text-sm mb-4 flex items-center gap-2"><Users className="w-4 h-4" /> EMERGENCY CONTACTS</h2>
@@ -429,7 +460,7 @@ export default function PrathamSuraksha() {
             </div>
         )}
 
-        {/* 🎨 SETTINGS TAB (UPDATED WITH NEW FEATURE) */}
+        {/* 🎨 SETTINGS TAB (Styled) */}
         {activeTab === 'settings' && (
             <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-4 space-y-4">
                 <h2 className="text-gray-800 font-bold text-sm mb-2 flex items-center gap-2"><Settings className="w-4 h-4" /> SETTINGS</h2>
@@ -460,7 +491,7 @@ export default function PrathamSuraksha() {
         )}
       </div>
 
-      {/* 🔵 BOTTOM NAVIGATION */}
+      {/* 🔵 BOTTOM NAVIGATION (Blue/Gray) */}
       <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 px-6 py-3 pb-safe z-50">
         <div className="flex items-center justify-around max-w-md mx-auto">
              <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'home' ? 'text-blue-900' : 'text-gray-400'}`}>
