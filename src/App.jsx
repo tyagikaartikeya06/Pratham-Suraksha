@@ -20,13 +20,16 @@ export default function PrathamSuraksha() {
   // Settings
   const [saveLocally, setSaveLocally] = useState(true); 
 
-  // 🟢 User ID (Privacy)
+  // User ID (Privacy)
   const [userId, setUserId] = useState(null);
 
   // Data States
   const [emergencyContacts, setEmergencyContacts] = useState([]); 
+  
+  // 🟢 STRICT LOCATION STATE (Default is 0,0 - No Fake IP)
   const [location, setLocation] = useState({ lat: 0, lng: 0, accuracy: 0 });
-  const [locationName, setLocationName] = useState("Locating...");
+  const [locationName, setLocationName] = useState("Waiting for GPS...");
+  const [gpsError, setGpsError] = useState(false);
   
   // System States
   const [offlineMode, setOfflineMode] = useState(!navigator.onLine);
@@ -44,7 +47,7 @@ export default function PrathamSuraksha() {
   const bluetoothDeviceRef = useRef(null);
 
   // ============================================
-  // 🟢 0. USER ID GENERATION
+  // 0. USER ID & NETWORK
   // ============================================
   useEffect(() => {
     let storedId = localStorage.getItem('pratham_user_id');
@@ -53,6 +56,16 @@ export default function PrathamSuraksha() {
         localStorage.setItem('pratham_user_id', storedId);
     }
     setUserId(storedId);
+
+    const handleOnline = () => setOfflineMode(false);
+    const handleOffline = () => setOfflineMode(true);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
   // ============================================
@@ -92,73 +105,103 @@ export default function PrathamSuraksha() {
       
       characteristic.addEventListener('characteristicvaluechanged', (event) => {
         const value = new TextDecoder().decode(event.target.value);
-        if (value.includes("SOS")) { handleEmergencyTap(3, true); }
+        if (value.startsWith("SOS:")) {
+            const parts = value.split(":");
+            const tapType = parseInt(parts[1]); 
+            if (!isNaN(tapType) && tapType >= 1 && tapType <= 4) handleEmergencyTap(tapType, true); 
+        } else if (value.includes("SOS")) {
+            handleEmergencyTap(3, true); 
+        }
       });
       setWearableConnected(true);
-      alert("✅ Watch Connected! Button will trigger SOS.");
+      alert("✅ Watch Connected!");
       device.addEventListener('gattserverdisconnected', () => setWearableConnected(false));
     } catch (error) { alert("Connection failed. Ensure Bluetooth is on."); }
   };
 
   // ============================================
-  // 3. 🔋 SMART BATTERY & GPS LOGIC
+  // 3. 🔋 SMART BATTERY & STRICT GPS LOGIC
   // ============================================
   useEffect(() => {
     if (userId) {
         fetch(`${API_BASE_URL}/api/contacts/list?userId=${userId}`) 
         .then(res => res.json())
-        .then(data => { if (Array.isArray(data)) setEmergencyContacts(data); })
-        .catch(err => console.log("Offline: Using empty contact list"));
+        .then(data => { 
+            if (Array.isArray(data)) {
+                setEmergencyContacts(data); 
+                localStorage.setItem('cached_contacts', JSON.stringify(data));
+            }
+        })
+        .catch(err => {
+            const cached = localStorage.getItem('cached_contacts');
+            if (cached) setEmergencyContacts(JSON.parse(cached));
+        });
     }
   }, [userId]);
 
   useEffect(() => {
-    const fetchIPLocation = () => {
-        if (!navigator.onLine) return;
-        fetch('https://ipapi.co/json/')
-            .then(res => res.json())
-            .then(data => {
-                if (data.latitude && data.longitude) {
-                    setLocation({ lat: data.latitude, lng: data.longitude, accuracy: 5000 });
-                    setLocationName(`${data.city}, ${data.region} (Approx)`);
-                }
-            })
-            .catch(e => console.log("IP Location failed"));
-    };
+    // 🟢 LOAD LAST KNOWN *REAL* GPS (Better than 0,0, but never IP)
+    const savedLoc = localStorage.getItem('last_known_gps');
+    if (savedLoc) {
+        setLocation(JSON.parse(savedLoc));
+        setLocationName("Last Known GPS");
+    }
 
     if ('geolocation' in navigator) {
-      const useHighAccuracy = offlineMode || !lowPowerMode || parentalMode;
-      const options = { enableHighAccuracy: useHighAccuracy, timeout: 15000, maximumAge: 60000 };
+      // 🟢 FORCE HIGH ACCURACY - NO COMPROMISE
+      const options = { 
+          enableHighAccuracy: true, 
+          timeout: 20000, 
+          maximumAge: 0 // Do not use old cached position automatically
+      };
 
       locationWatchId.current = navigator.geolocation.watchPosition(
         (position) => {
+          setGpsError(false);
           const lat = position.coords.latitude;
           const lng = position.coords.longitude;
           const accuracy = position.coords.accuracy;
-          setLocation({ lat, lng, accuracy, timestamp: Date.now() });
+          
+          const newLoc = { lat, lng, accuracy, timestamp: Date.now() };
+          setLocation(newLoc);
+          
+          // 🟢 Only save if accuracy is decent (e.g. under 100m) - Optional refinement
+          localStorage.setItem('last_known_gps', JSON.stringify(newLoc));
 
           if (navigator.onLine) {
             fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`)
               .then(res => res.json())
               .then(data => {
-                const city = data.address.city || data.address.town || "Unknown Area";
-                const area = data.address.suburb || "";
-                setLocationName(`${area}, ${city}`);
+                const name = `${data.address.suburb || ""}, ${data.address.city || ""}`;
+                setLocationName(name);
               })
-              .catch(() => setLocationName("GPS Active"));
+              .catch(() => setLocationName("GPS Active (Exact)"));
           } else {
-            setLocationName(`OFFLINE: ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+            setLocationName(`OFFLINE: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
           }
         },
-        (error) => { console.log('GPS Error:', error); fetchIPLocation(); },
+        (error) => {
+            console.log('GPS Error:', error);
+            setGpsError(true);
+            
+            // 🟢 STRICT ERROR MESSAGES
+            if(error.code === 1) setLocationName("⚠️ Permission Denied");
+            else if(error.code === 2) setLocationName("⚠️ GPS Signal Lost");
+            else setLocationName("⚠️ GPS Timeout");
+            
+            // ❌ REMOVED: fetchIPLocation fallback. 
+            // Now it stays on error or last known GPS.
+        },
         options
       );
-    } else { fetchIPLocation(); }
+    } else { 
+        setLocationName("❌ GPS Not Supported"); 
+    }
     return () => { if (locationWatchId.current) navigator.geolocation.clearWatch(locationWatchId.current); };
-  }, [offlineMode, lowPowerMode, parentalMode]);
+  }, []);
 
   // ============================================
-  // 4. 🛡️ SOS TAP LOGIC (ALL TAPS RECORD & SHARE)
+  // 4. 🛡️ SOS TAP LOGIC
   // ============================================
   const handleTap = () => {
     setTapCount(prev => {
@@ -170,91 +213,84 @@ export default function PrathamSuraksha() {
   };
 
   const handleEmergencyTap = async (tapType, fromWatch = false) => {
-    let title = "", contacts = [];
-    let dialNumber = "";
+    let title = "", contacts = [], dialNumber = "";
     
-    // 🟢 TAP 1: POLICE
-    if (tapType === 1) { 
-        title = "Police Help"; 
-        dialNumber = "100";
-        contacts = ["100"];
-    } 
-    // 🟢 TAP 2: MEDICAL
-    else if (tapType === 2) { 
-        title = "Medical Emergency"; 
-        dialNumber = "108";
-        contacts = ["108"];
-    } 
-    // 🟢 TAP 3: FAMILY
+    if (tapType === 1) { title = "Police Help"; dialNumber = "100"; contacts = ["100"]; } 
+    else if (tapType === 2) { title = "Medical Emergency"; dialNumber = "108"; contacts = ["108"]; } 
     else if (tapType === 3) {
       title = "Family Emergency";
-      if (emergencyContacts.length === 0) {
-        if (!fromWatch) alert("⚠️ Add contacts first!");
-        setActiveTab('contacts');
-        return;
-      }
+      if (emergencyContacts.length === 0) { if (!fromWatch) alert("⚠️ Add contacts first!"); setActiveTab('contacts'); return; }
       contacts = emergencyContacts.map(c => c.phone);
     } 
-    // 🟢 TAP 4: WATER/ACCIDENT
     else if (tapType >= 4) {
-        title = "CRITICAL: Water Rescue / Accident";
-        dialNumber = "108"; 
-        contacts = ["108"];
-        if (emergencyContacts.length > 0) {
-            contacts = [...contacts, ...emergencyContacts.map(c => c.phone)];
-        }
+        title = "CRITICAL: Water Rescue / Accident"; dialNumber = "108"; contacts = ["108"];
+        if (emergencyContacts.length > 0) contacts = [...contacts, ...emergencyContacts.map(c => c.phone)];
     } else { return; }
 
     if (!fromWatch && tapType === 3 && !window.confirm(`⚠️ ${title}\n\nSend SOS & Start Recording?`)) return;
 
-    // AUTO-RECORD
     if (!isRecording) {
         if (tapType >= 4) startAnonymousRecording('image', true);
         else startAnonymousRecording('video', true);
     }
 
-    navigator.geolocation.getCurrentPosition(async (pos) => {
-      const preciseLat = pos.coords.latitude;
-      const preciseLng = pos.coords.longitude;
-      const mapLink = `https://www.google.com/maps?q=${preciseLat},${preciseLng}`;
-      
-      let msgBody = `SOS! ${title} at ${locationName}. Loc: ${preciseLat}, ${preciseLng}. Map: ${mapLink}`;
-      if (tapType >= 4) msgBody = `CRITICAL WATER SOS! Image sent. Loc: ${preciseLat}, ${preciseLng}. Map: ${mapLink}`;
+    // 🟢 LOCATION CHECKER
+    const finalizeAlert = (lat, lng) => {
+        const finalLat = lat || location.lat;
+        const finalLng = lng || location.lng;
+        
+        let mapLink = "";
+        let locationText = "";
 
-      const sosData = { type: title, contacts, location: { lat: preciseLat, lng: preciseLng }, message: msgBody, time: new Date().toISOString() };
+        // If strict 0,0 (GPS never worked), we must be honest.
+        if (finalLat === 0 && finalLng === 0) {
+            mapLink = "GPS_OFF_UNKNOWN_LOCATION";
+            locationText = "GPS OFF / UNKNOWN";
+        } else {
+            mapLink = `https://www.google.com/maps?q=${finalLat},${finalLng}`;
+            locationText = `${finalLat}, ${finalLng}`;
+        }
 
-      if (navigator.onLine && !offlineMode) {
-        try {
-          await fetch(`${API_BASE_URL}/api/sos`, {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sosData),
-          });
-          if(!fromWatch) alert(`✅ Alert Sent!`);
-        } catch (err) { sendOfflineSMS(contacts, title, mapLink, preciseLat, preciseLng); }
-      } 
-      
-      sendOfflineSMS(contacts, title, mapLink, preciseLat, preciseLng);
-      
-      if (dialNumber) {
-          setTimeout(() => { window.location.href = `tel:${dialNumber}`; }, 500);
-      }
+        let msgBody = `SOS! ${title}. Loc: ${locationText}. Map: ${mapLink}`;
+        if (tapType >= 4) msgBody = `CRITICAL WATER SOS! Image sent. Loc: ${locationText}. Map: ${mapLink}`;
 
-    }, (err) => {
-        const mapLink = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
-        sendOfflineSMS(contacts, title, mapLink, location.lat, location.lng);
-    }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+        const sosData = { type: title, contacts, location: { lat: finalLat, lng: finalLng }, message: msgBody, time: new Date().toISOString() };
+
+        if (navigator.onLine && !offlineMode) {
+            fetch(`${API_BASE_URL}/api/sos`, {
+                method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sosData),
+            }).then(() => { if(!fromWatch) alert(`✅ Alert Sent!`); })
+              .catch(() => sendOfflineSMS(contacts, title, mapLink, finalLat, finalLng));
+        }
+        sendOfflineSMS(contacts, title, mapLink, finalLat, finalLng);
+        if (dialNumber) setTimeout(() => { window.location.href = `tel:${dialNumber}`; }, 500);
+    };
+
+    // Try fresh GPS, fallback to State (Last Known GPS)
+    navigator.geolocation.getCurrentPosition(
+        (pos) => finalizeAlert(pos.coords.latitude, pos.coords.longitude),
+        (err) => finalizeAlert(0, 0), // Use state fallback logic inside finalizeAlert
+        { enableHighAccuracy: true, timeout: 3000, maximumAge: 0 }
+    );
   };
 
   const sendOfflineSMS = (contacts, title, mapLink, lat, lng) => {
     const smsContacts = contacts.filter(c => c.length > 5); 
     if (smsContacts.length === 0) return;
-
     const separator = /iPhone|iPad|iPod/i.test(navigator.userAgent) ? ';' : ',';
-    const body = `SOS! ${title}. I am at Lat: ${lat}, Lng: ${lng}. Map: ${mapLink}`;
+    
+    let body = "";
+    // Honest Message if GPS is dead
+    if (lat === 0 && lng === 0) {
+        body = `SOS! ${title}. GPS SIGNAL LOST. Contact me immediately.`;
+    } else {
+        body = `SOS! ${title}. I am at Lat: ${lat}, Lng: ${lng}. Map: ${mapLink}`;
+    }
     window.location.href = `sms:${smsContacts.join(separator)}?body=${encodeURIComponent(body)}`;
   };
 
   // ============================================
-  // 5. 📹 RECORDING (UNIVERSAL SHARE)
+  // 5. 📹 RECORDING
   // ============================================
   const startAnonymousRecording = async (type, isAuto = false) => {
     if (!navigator.mediaDevices) { if(!isAuto) alert("Hardware not supported."); return; }
@@ -271,7 +307,6 @@ export default function PrathamSuraksha() {
           canvas.width = bitmap.width; canvas.height = bitmap.height;
           const context = canvas.getContext('2d');
           context.drawImage(bitmap, 0, 0);
-          
           canvas.toBlob(async (blob) => {
                const file = new File([blob], "SOS_Evidence.png", { type: "image/png" });
                if (saveLocally) {
@@ -301,7 +336,6 @@ export default function PrathamSuraksha() {
       const mediaRecorder = new MediaRecorder(stream);
       const chunks = [];
       mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
-      
       mediaRecorder.onstop = async () => {
         const blob = new Blob(chunks, { type: type === 'video' ? 'video/webm' : 'audio/webm' });
         const fileExt = type === 'video' ? 'webm' : 'webm';
@@ -313,11 +347,9 @@ export default function PrathamSuraksha() {
             document.body.appendChild(a); a.click();
             setTimeout(() => { document.body.removeChild(a); window.URL.revokeObjectURL(url); alert("✅ File Saved Locally!"); }, 100);
         }
-
         if (navigator.canShare && navigator.canShare({ files: [file] })) {
              try { await navigator.share({ files: [file], title: 'SOS Recording', text: `EMERGENCY RECORDING! Location: ${locationName}` }); } catch (err) {}
         }
-
         if (navigator.onLine) {
           const reader = new FileReader(); reader.readAsDataURL(blob);
           reader.onloadend = async () => {
@@ -335,10 +367,8 @@ export default function PrathamSuraksha() {
         setIsRecording(false);
         setRecordingType(null);
       };
-
       mediaRecorder.start();
       setTimeout(() => { if (mediaRecorder.state === 'recording') mediaRecorder.stop(); }, 30000); 
-
     } catch (err) { setIsRecording(false); }
   };
 
@@ -359,17 +389,16 @@ export default function PrathamSuraksha() {
     const name = prompt("Name:");
     if (!name) return;
     if (!/^[a-zA-Z\s]+$/.test(name)) { alert("❌ Error: Name should contain Alphabets only."); return; }
-
     const phone = prompt("Phone:");
     if (!phone) return;
     if (!/^\d+$/.test(phone)) { alert("❌ Error: Phone should contain Numeric Digits only."); return; }
-
     saveContactsToDB([{ name, phone, relation: 'Emergency' }]);
   };
 
   const saveContactsToDB = (newContacts) => {
     const contactsWithId = newContacts.map(c => ({ ...c, userId: userId }));
     setEmergencyContacts(prev => [...prev, ...contactsWithId]);
+    localStorage.setItem('cached_contacts', JSON.stringify([...emergencyContacts, ...contactsWithId]));
     contactsWithId.forEach(c => {
         fetch(`${API_BASE_URL}/api/contacts/add`, {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(c)
@@ -379,12 +408,12 @@ export default function PrathamSuraksha() {
 
   const shareLocation = () => {
     if (emergencyContacts.length === 0) return alert("Add contacts first!");
-    const mapLink = `https://www.google.com/maps?q=${location.lat},${location.lng}`;
+    const mapLink = location.lat === 0 ? "UNKNOWN_GPS" : `https://www.google.com/maps?q=${location.lat},${location.lng}`;
     sendOfflineSMS(emergencyContacts.map(c => c.phone), "Location Share", mapLink, location.lat, location.lng);
   };
 
   // ============================================
-  // RENDER UI (🟢 HEADER TEXT UPDATED)
+  // RENDER UI
   // ============================================
   return (
     <div className="min-h-screen bg-gray-50 text-gray-800 font-sans">
@@ -414,7 +443,7 @@ export default function PrathamSuraksha() {
         {activeTab === 'home' && (
           <div className="space-y-6">
             
-            {/* 🔴 SOS SECTION (HEADER UPDATED) */}
+            {/* 🔴 SOS SECTION */}
             <div className="bg-white rounded-2xl shadow-lg border border-gray-200 overflow-hidden">
                 <div className="bg-gray-50 px-4 py-3 border-b border-gray-200">
                     <h2 className="text-gray-800 font-bold text-sm text-center">EMERGENCY TAP ZONE</h2>
@@ -453,12 +482,12 @@ export default function PrathamSuraksha() {
                 </div>
             </div>
 
-            {/* LOCATION CARD */}
+            {/* LOCATION CARD (🟢 UPDATED UI FOR GPS ERROR) */}
             <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-4">
                 <h3 className="font-bold text-lg mb-3 flex items-center gap-2 text-gray-800"><MapPin className="w-5 h-5 text-green-600" /> Live Location</h3>
-                <div className="bg-gray-50 p-4 rounded-xl mb-3 border border-gray-100">
-                    <p className="text-lg font-bold text-blue-900">{locationName}</p>
-                    <p className="text-sm font-mono mt-1 text-gray-600">Lat: {location.lat.toFixed(5)}, Lng: {location.lng.toFixed(5)}</p>
+                <div className={`p-4 rounded-xl mb-3 border ${gpsError ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-100'}`}>
+                    <p className={`text-lg font-bold ${gpsError ? 'text-red-700' : 'text-blue-900'}`}>{locationName}</p>
+                    <p className="text-sm font-mono mt-1 text-gray-600">Lat: {location.lat.toFixed(6)}, Lng: {location.lng.toFixed(6)}</p>
                 </div>
                 <button onClick={shareLocation} className="w-full py-3 bg-gradient-to-r from-blue-900 to-blue-800 text-white rounded-xl font-bold text-sm shadow hover:opacity-90">SHARE LOCATION</button>
             </div>
