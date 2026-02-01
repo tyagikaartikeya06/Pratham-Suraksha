@@ -6,8 +6,8 @@ import { Shield, Phone, MapPin, Users, Camera, Mic, Video, Watch, Settings, Home
 // ===========================================
 const API_BASE_URL = "https://pratham-backend-9q7v.onrender.com"; 
 
-const BLE_SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb'; 
-const BLE_CHAR_UUID =    '0000ffe1-0000-1000-8000-00805f9b34fb';
+const BLE_SERVICE_UUID = '12345678-1234-1234-1234-123456789012'; 
+const BLE_CHAR_UUID =    '87654321-4321-4321-4321-210987654321';
 
 export default function PrathamSuraksha() {
   const [activeTab, setActiveTab] = useState('home');
@@ -91,32 +91,55 @@ export default function PrathamSuraksha() {
   };
 
   // ============================================
-  // 2. ⌚ BLUETOOTH WATCH CONNECTION
+  // ============================================
+  // 2. ⌚ BLUETOOTH WATCH CONNECTION (FIXED)
   // ============================================
   const connectWearable = async () => {
     if (!navigator.bluetooth) return alert("Bluetooth not supported in this browser.");
+    
     try {
-      const device = await navigator.bluetooth.requestDevice({ filters: [{ services: [BLE_SERVICE_UUID] }] });
+      console.log("Searching for Pratham Watch...");
+      
+      // 1. Search by NAME (Matches Arduino Code: BLEDevice::init("Pratham Watch"))
+      const device = await navigator.bluetooth.requestDevice({ 
+        filters: [{ name: 'Pratham Watch' }],
+        optionalServices: [BLE_SERVICE_UUID] // IMPORTANT: Permission to access the UUID
+      });
+
       bluetoothDeviceRef.current = device;
+      
+      // 2. Connect to Server
       const server = await device.gatt.connect();
       const service = await server.getPrimaryService(BLE_SERVICE_UUID);
       const characteristic = await service.getCharacteristic(BLE_CHAR_UUID);
+      
+      // 3. Start Listening
       await characteristic.startNotifications();
       
       characteristic.addEventListener('characteristicvaluechanged', (event) => {
+        // Decode the data from the watch
         const value = new TextDecoder().decode(event.target.value);
-        if (value.startsWith("SOS:")) {
-            const parts = value.split(":");
-            const tapType = parseInt(parts[1]); 
-            if (!isNaN(tapType) && tapType >= 1 && tapType <= 4) handleEmergencyTap(tapType, true); 
-        } else if (value.includes("SOS")) {
-            handleEmergencyTap(3, true); 
+        console.log("Received from Watch:", value);
+
+        // 4. CHECK FOR THE "SOS:1" MESSAGE
+        if (value.includes("SOS:1")) {
+            // alert("🚨 WATCH TRIGGERED SOS!"); // Optional debug alert
+            handleEmergencyTap(4, true); // Trigger the Water Rescue/Critical SOS logic
         }
       });
+
       setWearableConnected(true);
-      alert("✅ Watch Connected!");
-      device.addEventListener('gattserverdisconnected', () => setWearableConnected(false));
-    } catch (error) { alert("Connection failed. Ensure Bluetooth is on."); }
+      alert("✅ Watch Connected! Press button 4 times to test.");
+      
+      device.addEventListener('gattserverdisconnected', () => {
+          setWearableConnected(false);
+          alert("❌ Watch Disconnected");
+      });
+
+    } catch (error) { 
+        console.error(error);
+        alert("Connection failed: " + error.message); 
+    }
   };
 
   // ============================================
